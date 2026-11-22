@@ -177,6 +177,8 @@ interface BodyItem {
   kind: 'ctx' | 'del' | 'add';
   text: string;
   noNl: boolean;
+  /** Unified only: the body line was a bare empty line, not a ` ` line. */
+  bare?: boolean;
 }
 
 function splitON(items: BodyItem[]): { o: string[]; nIdx: number[] } {
@@ -255,7 +257,7 @@ interface USection {
   hunks: Hunk[];
 }
 
-const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(?:\s.*)?$/;
+const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /** The path of a ---/+++ line: after the 4 chars, to the first tab, trimmed. */
 function headerPath(raw: string): string {
@@ -274,10 +276,11 @@ function parseUnified(lines: string[]): Edit[] {
 
   const endBody = (): void => {
     if (hunk !== null) {
-      // Empty lines at the end of a body are not part of it.
+      // Empty lines at the end of a body are not part of it: only bare empty
+      // lines, not ` ` context lines whose text happens to be empty.
       while (hunk.items.length > 0) {
         const last = hunk.items[hunk.items.length - 1]!;
-        if (last.kind === 'ctx' && last.text === '') hunk.items.pop();
+        if (last.kind === 'ctx' && last.bare === true) hunk.items.pop();
         else break;
       }
       hunk = null;
@@ -331,7 +334,7 @@ function parseUnified(lines: string[]): Edit[] {
           const prev = hunk.items[hunk.items.length - 1];
           if (prev !== undefined) prev.noNl = true;
         } else if (line === '') {
-          hunk.items.push({ kind: 'ctx', text: '', noNl: false });
+          hunk.items.push({ kind: 'ctx', text: '', noNl: false, bare: true });
         } else {
           hunk.items.push({ kind: c === ' ' ? 'ctx' : c === '-' ? 'del' : 'add', text: line.slice(1), noNl: false });
         }
@@ -425,10 +428,13 @@ function unifiedEdit(s: USection): Edit {
   const isCreate = s.newFile || oldP === '/dev/null';
   const isDelete = s.deletedFile || newP === '/dev/null';
   return (tree) => {
+    // Section 10: every path the edit names is checked for safety before
+    // anything else about it (the /dev/null sentinel is not a path).
+    if (oldP !== null && oldP !== '/dev/null') needSafe(oldP);
+    if (newP !== null && newP !== '/dev/null') needSafe(newP);
     if (isCreate) {
       const p = newP ?? oldP;
       if (p === null || p === '/dev/null') throw new Fail('unsafe', String(p));
-      needSafe(p);
       tree.mustNotExist(p);
       const plus: string[] = [];
       let lastPlusNoNl = false;
@@ -446,14 +452,11 @@ function unifiedEdit(s: USection): Edit {
     if (isDelete) {
       const p = oldP ?? newP;
       if (p === null || p === '/dev/null') throw new Fail('unsafe', String(p));
-      needSafe(p);
       tree.mustExist(p);
       tree.now.set(p, null);
       return;
     }
     if (oldP === null || newP === null) throw new Fail('unsafe', String(oldP ?? newP));
-    needSafe(oldP);
-    needSafe(newP);
     if (oldP === newP) {
       const before = tree.mustExist(oldP);
       const after = applyHunks(toModel(before), s.hunks, strictGlobal, oldP);
@@ -974,6 +977,7 @@ function run(args: string[]): { code: number; out: string[] } {
     text: string;
     path: string;
     kind: string;
+    moveOld?: string;
   }
   const rows: Row[] = [];
   const changed = new Map<string, { was: string | null; now: string | null }>();
@@ -991,7 +995,7 @@ function run(args: string[]): { code: number; out: string[] } {
     if (consumed.has(oldP) || consumed.has(newP)) continue;
     consumed.add(oldP);
     consumed.add(newP);
-    rows.push({ sortKey: newP, text: `R ${oldP} -> ${newP}`, path: newP, kind: 'R' });
+    rows.push({ sortKey: newP, text: `R ${oldP} -> ${newP}`, path: newP, kind: 'R', moveOld: oldP });
   }
   for (const [p, c] of changed) {
     if (consumed.has(p)) continue;
@@ -1003,10 +1007,9 @@ function run(args: string[]): { code: number; out: string[] } {
   if (!checkOnly) {
     for (const row of rows) {
       if (row.kind === 'R') {
-        const [oldP, newP] = row.text.slice(2).split(' -> ') as [string, string];
-        rmSync(oldP, { force: true });
-        mkdirSync(dirname(newP), { recursive: true });
-        writeFileSync(newP, tree.now.get(newP)!);
+        rmSync(row.moveOld!, { force: true });
+        mkdirSync(dirname(row.path), { recursive: true });
+        writeFileSync(row.path, tree.now.get(row.path)!);
       } else if (row.kind === 'D') {
         rmSync(row.path, { force: true });
       } else {
