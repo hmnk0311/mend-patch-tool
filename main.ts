@@ -136,19 +136,50 @@ function lineEq(a: string, b: string, tier: number): boolean {
   return trimST(a) === trimST(b);
 }
 
-/** All start positions >= `from` where O matches `lines` at `tier`. */
+/** The canonical form of a line at a tier: two lines match at a tier exactly
+ * when their canonical forms are equal, so sequence matching can run on keys. */
+function tierKey(line: string, tier: number): string {
+  if (tier === 0) return line;
+  if (tier === 1) return rtrimST(line);
+  return trimST(line);
+}
+
+/** All start positions >= `from` where O matches `lines` at `tier`.
+ * Knuth-Morris-Pratt over canonical line keys: linear in the file size, so a
+ * long near-matching block in a repetitive file cannot blow the time limit. */
 function occurrencesAt(lines: string[], o: string[], tier: number, from: number): number[] {
   const out: number[] = [];
   if (o.length === 0) return out;
-  for (let i = Math.max(0, from); i + o.length <= lines.length; i += 1) {
-    let ok = true;
-    for (let j = 0; j < o.length; j += 1) {
-      if (!lineEq(lines[i + j]!, o[j]!, tier)) {
-        ok = false;
-        break;
-      }
+  const start = Math.max(0, from);
+  if (start + o.length > lines.length) return out;
+  const needle = o.map((l) => tierKey(l, tier));
+  const lps = new Array<number>(needle.length).fill(0);
+  for (let i = 1, len = 0; i < needle.length; ) {
+    if (needle[i] === needle[len]) {
+      len += 1;
+      lps[i] = len;
+      i += 1;
+    } else if (len > 0) {
+      len = lps[len - 1]!;
+    } else {
+      lps[i] = 0;
+      i += 1;
     }
-    if (ok) out.push(i);
+  }
+  let j = 0;
+  for (let i = start; i < lines.length; ) {
+    if (tierKey(lines[i]!, tier) === needle[j]) {
+      i += 1;
+      j += 1;
+      if (j === needle.length) {
+        out.push(i - j);
+        j = lps[j - 1]!;
+      }
+    } else if (j > 0) {
+      j = lps[j - 1]!;
+    } else {
+      i += 1;
+    }
   }
   return out;
 }
